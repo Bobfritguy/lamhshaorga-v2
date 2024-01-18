@@ -6,7 +6,6 @@ pub struct Servo {
     driver: LedcDriver<'static>,
     angle: u16,
     min_duty: u32,
-    max_duty: u32,
     duty_interval: u32,
     max_angle_degrees: u16,
 }
@@ -26,7 +25,6 @@ impl Servo {
             driver,
             angle: 0,
             min_duty,
-            max_duty,
             duty_interval: max_duty - min_duty,
             max_angle_degrees,
         }
@@ -41,7 +39,7 @@ impl Servo {
     }
 
     fn get_servo_duty(&self, angle: u16) -> u32 {
-        let percentage = (angle as f32 / self.max_angle_degrees as f32);
+        let percentage = angle as f32 / self.max_angle_degrees as f32;
 
         (self.duty_interval as f32 * percentage).round() as u32 + self.min_duty
     }

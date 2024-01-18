@@ -3,38 +3,36 @@
 // Modules
 mod wifi_setup;
 mod servo;
+mod display;
 
 // Standard library imports
 use std::{io, vec};
 use std::borrow::Borrow;
 use std::net::{UdpSocket};
-use std::time::Duration;
+
 
 // Third-party imports
 use anyhow::Result;
 use log::{error, info};
-use embedded_graphics::{mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder}, pixelcolor::BinaryColor, prelude::*, text::{Baseline, Text}};
-use ssd1306::{I2CDisplayInterface, Ssd1306};
-use ssd1306::rotation::DisplayRotation;
-use ssd1306::size::DisplaySize128x64;
-use ssd1306::mode::{DisplayConfig};
 
 // ESP IDF related imports
-use esp_idf_hal::delay::FreeRtos;
-use esp_idf_hal::gpio::{AnyOutputPin, OutputPin, PinDriver};
+use esp_idf_hal::gpio::{OutputPin, PinDriver};
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
-use esp_idf_hal::ledc::{config, LEDC, LedcChannel, LedcDriver, LedcTimerDriver};
+use esp_idf_hal::ledc::{config, LedcChannel, LedcDriver, LedcTimerDriver};
 use esp_idf_hal::peripheral::Peripheral;
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::units::FromValueType;
 use esp_idf_hal::timer::{TimerDriver, config as HalTimerConfig};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_sys::{esp, EspError, ledc_channel_t, nvs_flash_init};
+use esp_idf_sys::{esp, EspError, nvs_flash_init};
 
 // Custom Imports
 use servo::Servo;
+use crate::display::Display;
+
 #[allow(unused_imports)]
 use esp_idf_sys as _;
+
 
 
 #[toml_cfg::toml_config]
@@ -48,7 +46,6 @@ pub struct Config {
 // Set a constant CONTROL_SIGNAL_SIZE
 const VERSION_MIN: u32 = 5;
 const VERSION_MAJ: u32 = 0;
-const READ_TIMEOUT: Duration = Duration::from_millis(1000); // 1 second
 const MAX_CONTROL_SIGNAL_SIZE: usize = 11;
 
 // VALUES FOR SERVOS
@@ -104,68 +101,26 @@ fn main() -> Result<()> {
     let scl = peripherals.pins.gpio22;
 
     // Set up the i2c driver
-    let mut display_connected = false;
     let config = I2cConfig::new().baudrate(100.kHz().into());
-    let i2c_driver_result = I2cDriver::new(i2c, sda, scl, &config);
-    let i2c_driver_option: Option<I2cDriver> = match i2c_driver_result {
+
+    // Initialise the display, and write some text to it
+    let mut display = match I2cDriver::new(i2c, sda, scl, &config) {
         Ok(driver) => {
-            display_connected = true;
-            Some(driver)
+            Display::new(driver)
         },
         Err(e) => {
-            error!("Failed to initialize I2C driver: {:?}", e);
-            None
+            panic!("Failed to initialize I2C driver: {:?}", e);
         }
     };
 
-    if let Some(i2c_driver) = i2c_driver_option {
-        info!("I2C driver initialized successfully");
-        let interface = I2CDisplayInterface::new(i2c_driver);
-        let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0).into_buffered_graphics_mode();
+    display.flush();
+    let to_oled: String = format!("Robotic Limb V{}.{}\nIP Address: \n{}", VERSION_MAJ, VERSION_MIN,_wifi.sta_netif().get_ip_info()?.ip);
 
-        match display.init() {
-            Ok(_) => {
-                // Initialization succeeded
-            },
-            Err(e) => {
-                error!("Error initializing display: {:?}", e);
-            }
-        }
-
-        //Clear the display
-        match display.clear(BinaryColor::Off) {
-            Ok(_) => {
-                // Clear succeeded
-            },
-            Err(e) => {
-                error!("Error clearing display: {:?}", e);
-            }
-        };
-
-        let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_6X10)
-            .text_color(BinaryColor::On)
-            .build();
-
-        let to_oled: String = format!("Robotic Limb V{}.{}\nIP Address: \n{}", VERSION_MAJ, VERSION_MIN,_wifi.sta_netif().get_ip_info()?.ip);
+    display.set_text(to_oled);
+    display.draw();
 
 
-        Text::new(&to_oled, Point::new(0, 7), text_style)
-            .draw(&mut display)
-            .unwrap();
-
-        match display.flush() {
-            Ok(_) => info!("Display flushed successfully"),
-            Err(e) => error!("Failed to flush display: {:?}", e),
-
-        }
-        // End of display related code
-    }
-
-    let mut data: Vec<u8> = Vec::new();
-    let mut from_addr: std::net::SocketAddr;
-
-
+    // Set up the servo drivers
     let ledc_driver = match LedcTimerDriver::new(
                                     peripherals.ledc.timer0,
                                     &config::TimerConfig::new().resolution(esp_idf_hal::ledc::Resolution::Bits12).frequency(50.Hz().into()),
@@ -199,6 +154,10 @@ fn main() -> Result<()> {
     timer.enable_alarm(true)?;
     timer.enable(true)?;
 
+    let mut data: Vec<u8>;
+    let mut from_addr: std::net::SocketAddr;
+    let mut ack: Vec<u8> = vec![0u8];
+
     info!("Entering Loop");
     loop {
         match recv_data(&socket, MAX_CONTROL_SIGNAL_SIZE) {
@@ -231,20 +190,24 @@ fn main() -> Result<()> {
                     info!("{}: {}", servo.get_name(), servo.get_angle());
                 }
 
-                // Send an ack
-                let ack: Vec<u8> = vec![0u8];
+                ack.clear();
+                for servo in &servos{
+                    ack.push(servo.get_angle() as u8);
+                    ack.push((servo.get_angle() >> 8) as u8);
+                }
                 socket.send_to(&ack, from_addr)?;
 
-                // Code to send acknowledgement (TEST CODE)
+                // TIMER TEST
                 timer.counter()?;
                 timer.enable(true)?;
             },
             1 => {
                 info!("Received Poll Signal");
                 info!("Sending back to {}", from_addr);
-                let mut poll: Vec<u8> = Vec::new();
-
-                socket.send_to(&poll, from_addr)?;
+                // let mut poll: Vec<u8> = Vec::new();
+                //
+                // socket.send_to(&poll, from_addr)?;
+                // TODO: Send back servo positions & other info
             },
             _ => {
                 error!("Not a valid command");
