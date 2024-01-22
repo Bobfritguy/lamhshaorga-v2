@@ -13,6 +13,14 @@ use std::net::{UdpSocket};
 
 // Third-party imports
 use anyhow::Result;
+use embedded_graphics::draw_target::DrawTarget;
+use embedded_graphics::Drawable;
+use embedded_graphics::geometry::Point;
+use embedded_graphics::mono_font::ascii::FONT_6X10;
+use embedded_graphics::mono_font::iso_8859_16::FONT_5X8;
+use embedded_graphics::mono_font::MonoTextStyleBuilder;
+use embedded_graphics::pixelcolor::BinaryColor;
+use embedded_graphics::text::Text;
 use log::{error, info};
 
 // ESP IDF related imports
@@ -32,7 +40,9 @@ use crate::display::Display;
 
 #[allow(unused_imports)]
 use esp_idf_sys as _;
-
+use ssd1306::{I2CDisplayInterface, Ssd1306};
+use ssd1306::mode::{BufferedGraphicsMode, DisplayConfig};
+use ssd1306::prelude::{DisplayRotation, DisplaySize128x64, I2CInterface};
 
 
 #[toml_cfg::toml_config]
@@ -44,7 +54,7 @@ pub struct Config {
 }
 
 // Set a constant CONTROL_SIGNAL_SIZE
-const VERSION_MIN: u32 = 5;
+const VERSION_MIN: u32 = 6;
 const VERSION_MAJ: u32 = 0;
 const MAX_CONTROL_SIGNAL_SIZE: usize = 11;
 
@@ -56,7 +66,7 @@ const MIUZEI_MIN_DUTY: f32 = 0.018;
 const MIUZEI_MAX_DUTY: f32 = 0.11;
 
 
-const MIUZEI_MINI_MIN_DUTY: f32 = 0.018;
+const MIUZEI_MINI_MIN_DUTY: f32 = 0.024;
 const MIUZEI_MINI_MAX_DUTY: f32 = 0.11;
 
 // Control bytes
@@ -68,14 +78,58 @@ fn main() -> Result<()> {
 
     esp_idf_svc::log::EspLogger::initialize_default();
     // Initialize NVS, unsure if we will need this in future
-    init_nvs()?;
-
+    unsafe {
+        match nvs_flash_init() {
+            0 => info!("NVS Flash initialized"),
+            error_code => error!("NVS Flash initialization failed with error code: {}", error_code),
+        }
+    }
 
     // get peripherals
-    let peripherals: Peripherals = Peripherals::take().unwrap();
+    let peripherals: Peripherals = match Peripherals::take() {
+        Ok(peripherals) => peripherals,
+        Err(e) => {
+            panic!("Failed to take peripherals: {:?}", e);
+        }
+    };
 
     // get system event loop
-    let sysloop = EspSystemEventLoop::take()?;
+    let system_loop = match EspSystemEventLoop::take() {
+        Ok(sloop) => sloop,
+        Err(e) => {
+            panic!("Failed to take system event loop: {:?}", e);
+        }
+    };
+
+    // Set up pins for i2c, and i2c port
+    let i2c = peripherals.i2c0;
+    let sda = peripherals.pins.gpio21;
+    let scl = peripherals.pins.gpio22;
+
+    // Set up the i2c driver
+    let config = I2cConfig::new().baudrate(1.MHz().into());
+
+    let mut driver = match I2cDriver::new(i2c, sda, scl, &config) {
+        Ok(driver) => driver,
+        Err(e) => {
+            panic!("Failed to initialize I2C driver: {:?}", e);
+        }
+    };
+    let mut interface = I2CDisplayInterface::new(driver);
+
+    let mut display = Display::new(
+        Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0).into_buffered_graphics_mode()
+    );
+
+    let mut to_oled: String = "Starting...".parse()?;
+
+    display.init();
+    display.set_text(to_oled);
+    display.set_text_style(MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::On)
+        .build());
+    display.draw(0, 7);
 
 
     // Connect to WiFi
@@ -84,7 +138,7 @@ fn main() -> Result<()> {
         CONFIG.wifi_ssid,
         CONFIG.wifi_psk,
         peripherals.modem,
-        sysloop,
+        system_loop,
         6,
     )?;
 
@@ -94,30 +148,16 @@ fn main() -> Result<()> {
     let _mdns = wifi_setup::init_mdns();
     info!("mDNS initialized");
 
+    let ip_string = _wifi.sta_netif().get_ip_info()?.ip;
 
-    // Set up pins for i2c, and i2c port
-    let i2c = peripherals.i2c0;
-    let sda = peripherals.pins.gpio21;
-    let scl = peripherals.pins.gpio22;
+    to_oled = format!("Robotic Limb V{}.{}\nIP Address: \n{}", VERSION_MAJ, VERSION_MIN, ip_string).parse()?;
 
-    // Set up the i2c driver
-    let config = I2cConfig::new().baudrate(100.kHz().into());
-
-    // Initialise the display, and write some text to it
-    let mut display = match I2cDriver::new(i2c, sda, scl, &config) {
-        Ok(driver) => {
-            Display::new(driver)
-        },
-        Err(e) => {
-            panic!("Failed to initialize I2C driver: {:?}", e);
-        }
-    };
-
+    display.clear();
     display.flush();
-    let to_oled: String = format!("Robotic Limb V{}.{}\nIP Address: \n{}", VERSION_MAJ, VERSION_MIN,_wifi.sta_netif().get_ip_info()?.ip);
-
     display.set_text(to_oled);
-    display.draw();
+    display.draw(0, 7);
+
+
 
 
     // Set up the servo drivers
@@ -132,11 +172,11 @@ fn main() -> Result<()> {
 
     let mut servos: Vec<Servo> = Vec::new();
 
-    create_and_add_servo("Top", peripherals.ledc.channel0, &ledc_driver, peripherals.pins.gpio15, &mut servos, HOBBY_FANS_MIN_DUTY, HOBBY_FANS_MAX_DUTY, 180);
-    create_and_add_servo("Shoulder", peripherals.ledc.channel1, &ledc_driver, peripherals.pins.gpio16, &mut servos, HOBBY_FANS_MIN_DUTY, HOBBY_FANS_MAX_DUTY, 180);
-    create_and_add_servo("Upper Arm", peripherals.ledc.channel2, &ledc_driver, peripherals.pins.gpio17, &mut servos, HOBBY_FANS_MIN_DUTY, HOBBY_FANS_MAX_DUTY, 180);
-    create_and_add_servo("Elbow", peripherals.ledc.channel3, &ledc_driver, peripherals.pins.gpio18, &mut servos, HOBBY_FANS_MIN_DUTY, HOBBY_FANS_MAX_DUTY, 180);
-    create_and_add_servo("Lower Arm", peripherals.ledc.channel4, &ledc_driver, peripherals.pins.gpio19, &mut servos, HOBBY_FANS_MIN_DUTY, HOBBY_FANS_MAX_DUTY, 180);
+    create_and_add_servo("Top", peripherals.ledc.channel0, &ledc_driver, peripherals.pins.gpio15, &mut servos, MIUZEI_MINI_MIN_DUTY, MIUZEI_MINI_MAX_DUTY, 180);
+    create_and_add_servo("Shoulder", peripherals.ledc.channel1, &ledc_driver, peripherals.pins.gpio16, &mut servos, MIUZEI_MINI_MIN_DUTY, MIUZEI_MINI_MAX_DUTY, 180);
+    create_and_add_servo("Upper Arm", peripherals.ledc.channel2, &ledc_driver, peripherals.pins.gpio17, &mut servos, MIUZEI_MINI_MIN_DUTY, MIUZEI_MINI_MAX_DUTY, 180);
+    create_and_add_servo("Elbow", peripherals.ledc.channel3, &ledc_driver, peripherals.pins.gpio18, &mut servos, MIUZEI_MINI_MIN_DUTY, MIUZEI_MINI_MAX_DUTY, 180);
+    create_and_add_servo("Lower Arm", peripherals.ledc.channel4, &ledc_driver, peripherals.pins.gpio19, &mut servos, MIUZEI_MINI_MIN_DUTY, MIUZEI_MINI_MAX_DUTY, 180);
 
 
 
@@ -157,6 +197,12 @@ fn main() -> Result<()> {
     let mut data: Vec<u8>;
     let mut from_addr: std::net::SocketAddr;
     let mut ack: Vec<u8> = vec![0u8];
+
+    let mut servo_string = "Servo Positions:\n".to_string();
+    display.set_text_style(MonoTextStyleBuilder::new()
+        .font(&FONT_5X8)
+        .text_color(BinaryColor::On)
+        .build());
 
     info!("Entering Loop");
     loop {
@@ -179,16 +225,24 @@ fn main() -> Result<()> {
         match data[0] {
             0 => {
                 info!("Received Control Signal");
-                servos[0].set_angle(u16::from_be_bytes([data[1], data[2]]));
-                servos[1].set_angle(u16::from_be_bytes([data[3], data[4]]));
-                servos[2].set_angle(u16::from_be_bytes([data[5], data[6]]));
-                servos[3].set_angle(u16::from_be_bytes([data[7], data[8]]));
-                servos[4].set_angle(u16::from_be_bytes([data[9], data[10]]));
+                &servos[0].set_angle(u16::from_be_bytes([data[1], data[2]]));
+                &servos[1].set_angle(u16::from_be_bytes([data[3], data[4]]));
+                &servos[2].set_angle(u16::from_be_bytes([data[5], data[6]]));
+                &servos[3].set_angle(u16::from_be_bytes([data[7], data[8]]));
+                &servos[4].set_angle(u16::from_be_bytes([data[9], data[10]]));
 
-                info!("Servo Positions:");
-                for servo in &servos {
-                    info!("{}: {}", servo.get_name(), servo.get_angle());
-                }
+                let servo_string = format!(
+                    "Servo Positions:\n{}\n{}\n{}\n{}\n{}",
+                    servos[0].to_string(),
+                    servos[1].to_string(),
+                    servos[2].to_string(),
+                    servos[3].to_string(),
+                    servos[4].to_string()
+                );
+
+                display.clear();
+                display.draw_text(0, 7, servo_string);
+                display.flush();
 
                 ack.clear();
                 for servo in &servos{
@@ -198,8 +252,8 @@ fn main() -> Result<()> {
                 socket.send_to(&ack, from_addr)?;
 
                 // TIMER TEST
-                timer.counter()?;
-                timer.enable(true)?;
+                //timer.counter()?;
+                //timer.enable(true)?;
             },
             1 => {
                 info!("Received Poll Signal");
@@ -214,16 +268,6 @@ fn main() -> Result<()> {
             },
         }
     }
-}
-
-
-
-
-// Safe wrapper for nvs_flash_init()
-fn init_nvs() -> Result<(), EspError> {
-    let err = unsafe { nvs_flash_init() };
-    esp!(err)?;
-    Ok(())
 }
 
 // Function to receive data from UDP packet and return it along with the source address

@@ -31,6 +31,7 @@ impl Servo {
     }
 
     pub fn set_angle(&mut self, angle: u16){
+        self.angle = angle;
         let duty = self.get_servo_duty(angle);
         match self.driver.set_duty(duty) {
             Ok(_) => info!("{} set to {} degrees, duty {} of {}", self.name, angle, duty, self.driver.get_max_duty()),
@@ -44,6 +45,12 @@ impl Servo {
         (self.duty_interval as f32 * percentage).round() as u32 + self.min_duty
     }
 
+    pub fn set_duty(&mut self, duty: u16) {
+        match self.driver.set_duty(duty as u32) {
+            Ok(_) => info!("{} set to duty {}", self.name, duty),
+            Err(e) => error!("Failed to change duty of {}: {}", self.name, e),
+        }
+    }
     pub fn get_angle(&self) -> u16 {
         self.angle
     }
@@ -52,4 +59,7 @@ impl Servo {
         &self.name
     }
 
+    pub fn to_string(&self) -> String {
+        format!("{}: {}°", self.name, self.angle)
+    }
 }

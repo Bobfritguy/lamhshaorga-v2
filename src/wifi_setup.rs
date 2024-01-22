@@ -130,12 +130,17 @@ pub fn init_socket(read_timeout: Option<Duration>) -> std::net::UdpSocket {
     };
 
     match socket.set_read_timeout(read_timeout) {
-        Ok(_) => info!("Set socket read timeout to {}", read_timeout.unwrap().as_millis()),
+        Ok(_) => {
+            match read_timeout {
+                Some(timeout) => info!("Set socket read timeout to {}", timeout.as_millis()),
+                None => info!("Read timeout is not set"),
+            }
+        },
         Err(e) => error!("Failed to set socket timeout to {}: {}", read_timeout.unwrap().as_millis(), e)
     };
 
 
-    match socket.set_nonblocking(true) {
+    match socket.set_nonblocking(false) {
         Ok(_) => info!("Socket set to non-blocking."),
         Err(e) => error!("Failed to set the socket to non-blocking: {}", e),
     };
