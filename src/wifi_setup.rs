@@ -117,7 +117,8 @@ pub fn init_mdns() -> Result<esp_idf_svc::mdns::EspMdns, esp_idf_sys::EspError> 
         "_udp",
         8080,
         &[
-            ("controls", "8") // 8 controls
+            ("controls", "5"), // 8 controls
+            ("bytes", "11"),
         ]
     )?;
     Ok(mdns)
