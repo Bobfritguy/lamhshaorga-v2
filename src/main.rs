@@ -222,6 +222,8 @@ fn main() -> Result<()> {
 
     let mut led = PinDriver::output(peripherals.pins.gpio4)?;
 
+    //let mut resistor = PinDriver::input(peripherals.pins.gpio2)?;
+
     // Timer setup
     let mut timer = match TimerDriver::new(
         peripherals.timer00,
@@ -296,6 +298,8 @@ fn main() -> Result<()> {
                 continue;
             }
         }
+        // Read pin
+
             match ctrl_vec[0] {
                 0 => {
                     servos[0].set_angle(u16::from_be_bytes([ctrl_vec[1], ctrl_vec[2]]));
